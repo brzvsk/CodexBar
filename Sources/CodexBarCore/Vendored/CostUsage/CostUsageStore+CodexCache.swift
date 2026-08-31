@@ -332,7 +332,8 @@ extension CostUsageStore {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.turnKeys = try container.decodeIfPresent([String: String].self, forKey: .turnKeys)
             self.turnIDsByDay = try container.decodeIfPresent([String: [String]].self, forKey: .turnIDsByDay)
-            self.resolvedTurns = try container.decodeIfPresent(
+            // Invalid optional evidence falls back to row pricing and hash-validated cursor days.
+            self.resolvedTurns = try? container.decodeIfPresent(
                 [String: CostUsageScanner.CodexPriorityTurnMetadata].self,
                 forKey: .resolvedTurns)
             self.turnsCursor = try? container.decodeIfPresent(

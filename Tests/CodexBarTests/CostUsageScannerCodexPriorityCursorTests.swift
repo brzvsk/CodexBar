@@ -1179,6 +1179,58 @@ extension CostUsageScannerCodexPriorityCursorTests {
         #expect(reloaded.turns.keys.sorted() == ["turn-a"])
     }
 
+    @Test(arguments: [false, true])
+    func `malformed resolved pricing preserves valid priority state`(supersededCursor: Bool) async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        try CostUsageScannerCodexPriorityTests.insertTestLog(
+            dbURL: dbURL,
+            timestamp: ISO8601DateFormatter().string(from: now),
+            body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a"))
+        try Self.writeCodexSession(env: env, now: now)
+        let expectedReport = Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now)
+        let original = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        var expectedCursor = try #require(original.codexPriorityTurnsCursor)
+        #expect(original.codexPriorityTurnKeys?.isEmpty == false)
+        #expect(original.codexResolvedPriorityTurns?.isEmpty == false)
+
+        let store = CostUsageStore(cacheRoot: env.cacheRoot)
+        var metadata = await store.fetchMetadata()
+        let encoded = try #require(metadata.priorityTurnStatePayload)
+        var payload = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        if supersededCursor {
+            expectedCursor.turns["turn-a"]?.model = "gpt-5.4"
+            expectedCursor.requestSourcesByTurnID["turn-a"]?[1]?.model = "gpt-5.4"
+            payload["turnsCursor"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(expectedCursor))
+        }
+        payload["resolvedTurns"] = ["turn-a": ["turnID": 123]]
+        metadata.priorityTurnStatePayload = try JSONSerialization.data(withJSONObject: payload)
+        #expect(await store.setMetadata(metadata))
+
+        let loaded = store.syncLoadCodexCache(calendar: .current)
+        #expect(loaded.codexPriorityTurnKeys == original.codexPriorityTurnKeys)
+        #expect(loaded.codexPriorityTurnIDsByDay == original.codexPriorityTurnIDsByDay)
+        #expect(loaded.codexPriorityTurnsCursor == expectedCursor)
+        #expect(loaded.codexResolvedPriorityTurns == nil)
+        #expect(loaded.files == original.files)
+        #expect(loaded.days == original.days)
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        let backupURL = env.root.appendingPathComponent("logs_2.backup.sqlite")
+        try FileManager.default.moveItem(at: dbURL, to: backupURL)
+        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        let pending = Self.loadCodexDailyReport(
+            env: env, databaseURL: dbURL, now: now.addingTimeInterval(2))
+        #expect(pending.data == expectedReport.data)
+        #expect(pending.summary == expectedReport.summary)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == loaded)
+    }
+
     @Test
     func `malformed priority turns cursor still loads turn keys`() async throws {
         let env = try CostUsageTestEnvironment()
