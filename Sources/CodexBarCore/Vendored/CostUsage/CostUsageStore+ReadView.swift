@@ -70,19 +70,12 @@ struct CostUsageStoreReadView: Sendable {
     }
 
     func dailyReport(range: CostUsageScanner.CostUsageDayRange, cacheRoot: URL?) -> CostUsageDailyReport {
-        CostUsageScanner.buildCodexReportFromCache(
-            cache: self.cache,
-            range: range,
-            modelsDevCacheRoot: cacheRoot,
-            priorityTurns: self.cache.codexResolvedPriorityTurns ?? [:])
+        CostUsageScanner.buildCodexReportFromCache(cache: self.cache, range: range, modelsDevCacheRoot: cacheRoot)
     }
 
     func projects(range: CostUsageScanner.CostUsageDayRange, cacheRoot: URL?) -> [CostUsageProjectBreakdown] {
         CostUsageScanner.buildCodexProjectBreakdownsFromCache(
-            cache: self.cache,
-            range: range,
-            modelsDevCacheRoot: cacheRoot,
-            priorityTurns: self.cache.codexResolvedPriorityTurns ?? [:])
+            cache: self.cache, range: range, modelsDevCacheRoot: cacheRoot)
     }
 
     func sessions(
@@ -91,11 +84,7 @@ struct CostUsageStoreReadView: Sendable {
         roots: [URL]) -> [CostUsageSessionBreakdown]
     {
         CostUsageScanner.buildCodexSessionBreakdownsFromCache(
-            cache: self.cache,
-            range: range,
-            modelsDevCacheRoot: cacheRoot,
-            sessionRoots: roots,
-            priorityTurns: self.cache.codexResolvedPriorityTurns ?? [:])
+            cache: self.cache, range: range, modelsDevCacheRoot: cacheRoot, sessionRoots: roots)
     }
 
     func catchUpStatus(

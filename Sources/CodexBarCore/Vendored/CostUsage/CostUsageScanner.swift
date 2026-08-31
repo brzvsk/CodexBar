@@ -5355,7 +5355,8 @@ enum CostUsageScanner {
             databaseURL: resolvedPriorityDatabaseURL,
             sinceDayKey: range.scanSinceKey,
             untilDayKey: range.scanUntilKey) : nil
-        let priorityTurns = priorityResolution?.turns ?? [:]
+        let priorityTurns = priorityResolution?.turns
+            ?? Self.validatedPriorityTurns(cache: cache, calendar: range.calendar)
         let priorityValidationPending = priorityResolution?.validationPending ?? false
         let priorityMetadataChanged = detectedPriorityMetadataChanged && !priorityValidationPending
         let priorityTurnsCursor = shouldInspectPriorityTurns && !priorityValidationPending

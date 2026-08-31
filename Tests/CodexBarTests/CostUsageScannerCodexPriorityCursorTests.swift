@@ -601,6 +601,22 @@ struct CostUsageScannerCodexPriorityCursorTests {
             == correctedReport.summary?.totalCostUSD)
         #expect(view.sessions(range: historicalRange, cacheRoot: env.cacheRoot, roots: [env.codexSessionsRoot])
             .first?.costUSD == correctedReport.summary?.totalCostUSD)
+        #expect(CostUsageScanner.buildCodexReportFromCache(cache: correctedCache, range: historicalRange).summary
+            == correctedReport.summary)
+        #expect(CostUsageScanner.buildCodexProjectBreakdownsFromCache(cache: correctedCache, range: historicalRange)
+            .first?.totalCostUSD == correctedReport.summary?.totalCostUSD)
+        #expect(CostUsageScanner.buildCodexSessionBreakdownsFromCache(cache: correctedCache, range: historicalRange)
+            .first?.costUSD == correctedReport.summary?.totalCostUSD)
+        let debounced = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(1.5),
+            refreshMinIntervalSeconds: 60)
+        #expect(debounced.data == correctedReport.data)
+        #expect(debounced.summary == correctedReport.summary)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == correctedCache)
         if legacyCache {
             correctedCache.codexResolvedPriorityTurns = nil
             #expect(!CostUsageStoreAccess.replace(cacheRoot: env.cacheRoot, cache: correctedCache).catchUpRequired)
@@ -1291,14 +1307,15 @@ extension CostUsageScannerCodexPriorityCursorTests {
         since: Date? = nil,
         until: Date? = nil,
         now: Date,
-        forceRescan: Bool = false) -> CostUsageDailyReport
+        forceRescan: Bool = false,
+        refreshMinIntervalSeconds: TimeInterval = 0) -> CostUsageDailyReport
     {
         var options = CostUsageScanner.Options(
             codexSessionsRoot: env.codexSessionsRoot,
             claudeProjectsRoots: nil,
             cacheRoot: env.cacheRoot,
             codexTraceDatabaseURL: databaseURL)
-        options.refreshMinIntervalSeconds = 0
+        options.refreshMinIntervalSeconds = refreshMinIntervalSeconds
         options.forceRescan = forceRescan
         return CostUsageScanner.loadDailyReport(
             provider: .codex,
