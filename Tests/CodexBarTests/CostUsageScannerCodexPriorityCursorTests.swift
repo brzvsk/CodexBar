@@ -461,6 +461,70 @@ struct CostUsageScannerCodexPriorityCursorTests {
     }
 
     @Test
+    func `historical trace read failure retains persisted priority pricing`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        let backupURL = env.root.appendingPathComponent("logs_2.backup.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        let historicalDay = try #require(Calendar.current.date(byAdding: .day, value: -10, to: now))
+        let epoch = Int64(historicalDay.timeIntervalSince1970)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [
+            (epochSeconds: epoch, body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ])
+        try Self.writeCodexSession(env: env, now: historicalDay)
+
+        _ = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: now,
+            now: now)
+        let expectedReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(1))
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let initialCursor = try #require(initialCache.codexPriorityTurnsCursor)
+        let initialLastScanUnixMs = initialCache.lastScanUnixMs
+        #expect((expectedReport.data.first?.modelBreakdowns?.first?.priorityCostUSD ?? 0) > 0)
+
+        let preparedCache = Self.cacheRequiringPricingMetadataMigration(initialCache)
+        CostUsageStoreAccess.replace(cacheRoot: env.cacheRoot, cache: preparedCache)
+        let store = CostUsageStore(cacheRoot: env.cacheRoot)
+        for (path, usage) in preparedCache.files {
+            let rows = try (usage.codexRows ?? []).enumerated().map { index, row in
+                try CostUsageStoreUsageRow(
+                    path: path,
+                    rowIndex: index,
+                    payload: JSONEncoder().encode(row))
+            }
+            #expect(await store.replaceUsageRows(path: path, rows: rows))
+        }
+
+        try FileManager.default.moveItem(at: dbURL, to: backupURL)
+        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        let pendingReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(2))
+
+        #expect(pendingReport.data == expectedReport.data)
+        #expect(pendingReport.summary == expectedReport.summary)
+        let pendingCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(pendingCache.lastScanUnixMs == initialLastScanUnixMs)
+        #expect(pendingCache.codexPriorityTurnsCursor == initialCursor)
+    }
+
+    @Test
     func `fallback fault hook is scoped to its database path`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }

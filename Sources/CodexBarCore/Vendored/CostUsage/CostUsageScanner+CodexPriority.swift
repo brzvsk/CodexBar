@@ -322,12 +322,10 @@ extension CostUsageScanner {
 
         #if canImport(SQLite3)
         if let untilDayKey, untilDayKey < CostUsageDayRange.dayKey(from: Date()) {
-            return CodexPriorityTurnsResolution(
-                turns: self.boundedCodexPriorityTurns(
-                    databaseURL: url,
-                    sinceDayKey: sinceDayKey,
-                    untilDayKey: untilDayKey),
-                validationPending: false)
+            return self.boundedCodexPriorityTurns(
+                databaseURL: url,
+                sinceDayKey: sinceDayKey,
+                untilDayKey: untilDayKey)
         }
 
         guard let opened = self.openCodexPriorityDatabase(at: url) else {
@@ -479,12 +477,12 @@ extension CostUsageScanner {
     private static func boundedCodexPriorityTurns(
         databaseURL: URL,
         sinceDayKey: String?,
-        untilDayKey: String?) -> [String: CodexPriorityTurnMetadata]
+        untilDayKey: String?) -> CodexPriorityTurnsResolution
     {
         var db: OpaquePointer?
         guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             sqlite3_close(db)
-            return [:]
+            return CodexPriorityTurnsResolution(turns: [:], validationPending: true)
         }
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 250)
@@ -498,17 +496,22 @@ extension CostUsageScanner {
                or feedback_log_body like '%service_tier: Some(Some("priority"))%')
         """
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return [:] }
+        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else {
+            return CodexPriorityTurnsResolution(turns: [:], validationPending: true)
+        }
         defer { sqlite3_finalize(stmt) }
         let start = self.epochSeconds(forDayKey: sinceDayKey ?? "0000-01-01") ?? 0
         let end = self.epochSeconds(forDayKey: self.nextDayKey(after: untilDayKey ?? "9999-12-30"))
             ?? Int64.max
-        sqlite3_bind_int64(stmt, 1, start)
-        sqlite3_bind_int64(stmt, 2, end)
+        guard sqlite3_bind_int64(stmt, 1, start) == SQLITE_OK,
+              sqlite3_bind_int64(stmt, 2, end) == SQLITE_OK
+        else { return CodexPriorityTurnsResolution(turns: [:], validationPending: true) }
 
         var turns: [String: CodexPriorityTurnMetadata] = [:]
         var completedModelsByTurnID: [String: String] = [:]
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var stepResult = sqlite3_step(stmt)
+        while stepResult == SQLITE_ROW {
+            defer { stepResult = sqlite3_step(stmt) }
             let timestamp = self.timestamp(stmt: stmt, index: 0)
             guard self.timestamp(timestamp, isInRangeSince: sinceDayKey, until: untilDayKey),
                   let body = self.text(stmt: stmt, index: 1)
@@ -521,14 +524,16 @@ extension CostUsageScanner {
                 }
                 continue
             }
-            guard var parsed = self.parseCodexPriorityTraceRow(timestamp: timestamp, body: body)
-            else { continue }
-            if let completedModel = completedModelsByTurnID[parsed.turnID] {
-                parsed.model = completedModel
+            if var parsed = self.parseCodexPriorityTraceRow(timestamp: timestamp, body: body) {
+                if let completedModel = completedModelsByTurnID[parsed.turnID] {
+                    parsed.model = completedModel
+                }
+                turns[parsed.turnID] = parsed
             }
-            turns[parsed.turnID] = parsed
         }
-        return turns
+        return CodexPriorityTurnsResolution(
+            turns: turns,
+            validationPending: stepResult != SQLITE_DONE)
     }
 
     private static func maxCodexLogsRowID(_ db: OpaquePointer?) -> Int64? {
