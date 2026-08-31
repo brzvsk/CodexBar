@@ -5442,12 +5442,17 @@ enum CostUsageScanner {
               !sourceCache.days.isEmpty
         else { return nil }
 
+        let priorityTurns = if plan.priorityValidationPending {
+            sourceCache.codexPriorityTurnsCursor?.turns ?? plan.priorityTurns
+        } else {
+            plan.priorityTurns
+        }
         let report = self.buildCodexReportFromCache(
             cache: sourceCache,
             range: range,
             modelsDevCatalog: plan.modelsDevCatalog,
             modelsDevCacheRoot: options.cacheRoot,
-            priorityTurns: plan.priorityTurns)
+            priorityTurns: priorityTurns)
         return CostUsageCodexPreviousReport(
             report: report,
             cache: sourceCache,

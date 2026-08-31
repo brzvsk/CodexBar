@@ -358,6 +358,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
         let initialCursor = try #require(initialCache.codexPriorityTurnsCursor)
         let initialLastScanUnixMs = initialCache.lastScanUnixMs
         #expect(initialCursor.turns.keys.sorted() == ["turn-a"])
+        #expect((initialReport.data.first?.modelBreakdowns?.first?.priorityCostUSD ?? 0) > 0)
         #expect(initialCursor.anchors?.map(\.rowID) == [2, 4, 6, 8])
         #expect(initialCache.codexScanCatchUpPending != true)
         #expect(initialCache.lastScanUnixMs > 0)
@@ -394,6 +395,69 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(retriedCache.lastScanUnixMs > initialLastScanUnixMs)
         #expect(retriedCursor.turns.keys.sorted() == ["turn-x"])
         #expect(!retriedCursor.turns.keys.contains("turn-a"))
+    }
+
+    @Test
+    func `trace open failure retains persisted priority pricing`() async throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        let backupURL = env.root.appendingPathComponent("logs_2.backup.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        let epoch = Int64(now.timeIntervalSince1970)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [
+            (epochSeconds: epoch, body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ])
+        try Self.writeCodexSession(env: env, now: now)
+
+        let initialReport = Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let initialCursor = try #require(initialCache.codexPriorityTurnsCursor)
+        let initialLastScanUnixMs = initialCache.lastScanUnixMs
+        #expect((initialReport.data.first?.modelBreakdowns?.first?.priorityCostUSD ?? 0) > 0)
+        let preparedCache = Self.cacheRequiringPricingMetadataMigration(initialCache)
+        CostUsageStoreAccess.replace(cacheRoot: env.cacheRoot, cache: preparedCache)
+        let store = CostUsageStore(cacheRoot: env.cacheRoot)
+        for (path, usage) in preparedCache.files {
+            let rows = try (usage.codexRows ?? []).enumerated().map { index, row in
+                try CostUsageStoreUsageRow(
+                    path: path,
+                    rowIndex: index,
+                    payload: JSONEncoder().encode(row))
+            }
+            #expect(await store.replaceUsageRows(path: path, rows: rows))
+        }
+        let migrationCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let migrationRows = migrationCache.files.values.flatMap { $0.codexRows ?? [] }
+        #expect(!migrationRows.isEmpty)
+        #expect(migrationRows.allSatisfy { $0.pricingMode == nil })
+        #expect(migrationCache.files.values.allSatisfy { $0.codexPriorityTokens == nil })
+
+        try FileManager.default.moveItem(at: dbURL, to: backupURL)
+        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        let pendingReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            now: now.addingTimeInterval(1))
+
+        #expect(pendingReport.data == initialReport.data)
+        #expect(pendingReport.summary == initialReport.summary)
+        let pendingCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(pendingCache.lastScanUnixMs == initialLastScanUnixMs)
+        #expect(pendingCache.codexPriorityTurnsCursor == initialCursor)
+
+        try FileManager.default.removeItem(at: dbURL)
+        try FileManager.default.moveItem(at: backupURL, to: dbURL)
+        let retriedReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            now: now.addingTimeInterval(2))
+        #expect(retriedReport.data == initialReport.data)
+        #expect(retriedReport.summary == initialReport.summary)
     }
 
     @Test
@@ -1018,15 +1082,45 @@ extension CostUsageScannerCodexPriorityCursorTests {
         let iso = env.isoString(for: now)
         let lines = [
             #"{"type":"session_meta","timestamp":"\#(iso)","payload":{"session_id":"cursor-skip"}}"#,
-            #"{"type":"turn_context","timestamp":"\#(iso)","payload":{"model":"gpt-5.2-codex"}}"#,
+            #"{"type":"turn_context","timestamp":"\#(iso)","payload":{"model":"gpt-5.5"}}"#,
+            #"{"type":"event_msg","timestamp":"\#(iso)","payload":{"type":"task_started","turn_id":"turn-a"}}"#,
             #"{"type":"event_msg","timestamp":"\#(iso)","payload":{"type":"token_count","info":"#
                 + #"{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10},"#
-                + #""model":"gpt-5.2-codex"}}}"#,
+                + #""model":"gpt-5.5"}}}"#,
         ]
         _ = try env.writeCodexSessionFile(
             day: now,
             filename: "cursor-skip.jsonl",
             contents: lines.joined(separator: "\n") + "\n")
+    }
+
+    private static func cacheRequiringPricingMetadataMigration(_ cache: CostUsageCache) -> CostUsageCache {
+        var migrationCache = cache
+        for path in migrationCache.files.keys {
+            guard var usage = migrationCache.files[path] else { continue }
+            usage.codexCostCacheComplete = false
+            usage.codexStandardTokens = nil
+            usage.codexPriorityTokens = nil
+            usage.codexRows = usage.codexRows?.map { row in
+                CostUsageScanner.CodexUsageRow(
+                    day: row.day,
+                    model: row.model,
+                    rawModel: row.rawModel,
+                    turnID: row.turnID,
+                    eventIndex: row.eventIndex,
+                    timestampUnixMs: row.timestampUnixMs,
+                    input: row.input,
+                    cached: row.cached,
+                    output: row.output,
+                    reasoning: row.reasoning,
+                    knownCostNanos: row.knownCostNanos,
+                    unpricedTokens: row.unpricedTokens,
+                    pricingModel: row.pricingModel,
+                    pricingMode: nil)
+            }
+            migrationCache.files[path] = usage.refreshingCodexWorkspaceUsageFingerprint()
+        }
+        return migrationCache
     }
 
     private static func expectedPriorityTurnKeys(
