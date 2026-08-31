@@ -4,6 +4,7 @@
 
 ### Performance
 - Claude and Vertex AI: reuse model normalization and pricing lookups within each local scan, including unknown models, while preserving per-request dated and context-tier pricing.
+- Codex: preserve the priority-turn cursor across ordinary trace-row pruning, avoiding a full repeat scan when enough retained content anchors still match.
 
 ## 0.56.2 — 2026-08-31
 

@@ -5,6 +5,7 @@ import SQLite3
 import Testing
 @testable import CodexBarCore
 
+@Suite(.serialized)
 struct CostUsageScannerCodexPriorityCursorTests {
     @Test
     func `relaunch reuses persisted priority cursor and scans only appended rows`() throws {
@@ -38,6 +39,14 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(!firstMemo.anchorDigest.isEmpty)
         #expect(persisted.anchorRowID == firstMemo.anchorRowID)
         #expect(persisted.anchorDigest == firstMemo.anchorDigest)
+        #expect(persisted.anchors?.count == 4)
+        #expect(persisted.anchors?.last?.rowID == persisted.anchorRowID)
+        #expect(persisted.anchors?.last?.digest == persisted.anchorDigest)
+        let downgrade = try JSONDecoder().decode(
+            LegacyCursorProjection.self,
+            from: JSONEncoder().encode(persisted))
+        #expect(downgrade.anchorRowID == persisted.anchorRowID)
+        #expect(downgrade.anchorDigest == persisted.anchorDigest)
 
         CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
         try Self.updateTestLog(
@@ -183,14 +192,14 @@ struct CostUsageScannerCodexPriorityCursorTests {
             body: Self.priorityRequestBody(threadID: "thread-z", turnID: "turn-z"))])
         let incremental = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
         let incrementalMemo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
-        #expect(incremental.keys.sorted() == ["turn-x", "turn-z"])
-        #expect(!incremental.keys.contains("turn-y"))
+        #expect(incremental.keys.sorted() == ["turn-y", "turn-z"])
+        #expect(!incremental.keys.contains("turn-x"))
         #expect(incrementalMemo.lastRowID == freshMemo.lastRowID + 1)
         #expect(incrementalMemo.anchorRowID == incrementalMemo.lastRowID)
     }
 
     @Test
-    func `deleted anchor row forces a full rescan`() throws {
+    func `deleted terminal anchor with surviving quorum resumes incrementally`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
@@ -212,7 +221,94 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(persisted.lastRowID == 8)
         #expect(persisted.turns.keys.sorted() == ["turn-a"])
         #expect(persisted.anchorRowID == persisted.lastRowID)
+        #expect(persisted.anchors?.map(\.rowID) == [2, 4, 6, 8])
 
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.updateTestLog(
+            dbURL: dbURL,
+            rowID: 3,
+            body: Self.priorityRequestBody(threadID: "sentinel", turnID: "sentinel-old-row"))
+        try Self.deleteTestLog(dbURL: dbURL, rowID: persisted.lastRowID)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+            epochSeconds: epoch,
+            body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+
+        let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let memo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
+        #expect(turns.keys.sorted() == ["turn-a", "turn-new"])
+        #expect(!turns.keys.contains("sentinel-old-row"))
+        #expect(memo.lastRowID == persisted.lastRowID + 1)
+        #expect(memo.anchors?.count == 4)
+        #expect(!((memo.anchors ?? []).contains { $0.rowID == persisted.anchorRowID }))
+    }
+
+    @Test
+    func `pruned tracked request and completion preserve cold scan parity`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        let rows: [(epochSeconds: Int64, body: String)] = [
+            (epoch, Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+            (epoch, Self.completedBody(turnID: "turn-a", model: "model-a")),
+            (epoch, Self.priorityRequestBody(threadID: "thread-b", turnID: "turn-b")),
+            (epoch, Self.completedBody(turnID: "turn-b", model: "model-b")),
+            (epoch, "routine trace row 5"),
+            (epoch, "routine trace row 6"),
+            (epoch, "routine trace row 7"),
+            (epoch, "routine trace row 8"),
+        ]
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        #expect(persisted.anchors?.map(\.rowID) == [2, 4, 6, 8])
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.deleteTestLogs(dbURL: dbURL, rowIDs: [2, 3, 8])
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+            epochSeconds: epoch,
+            body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+
+        let resumedTurns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let resumed = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        let freshTurns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+
+        #expect(resumedTurns == freshTurns)
+        #expect(resumedTurns.keys.sorted() == ["turn-a", "turn-new"])
+        #expect(resumedTurns["turn-a"]?.model == "gpt-5.5")
+        #expect(resumedTurns["turn-a"]?.model != "model-a")
+        #expect(resumed.anchors?.count == 4)
+        #expect(!((resumed.anchors ?? []).contains { [2, 8].contains($0.rowID) }))
+    }
+
+    @Test
+    func `changed retained priority source forces cold scan parity after terminal pruning`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        var rows: [(epochSeconds: Int64, body: String)] = [
+            (epochSeconds: epoch, body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ]
+        rows.append(contentsOf: (1..<8).map { index in
+            (epochSeconds: epoch, body: "thread_id=t-\(index) turn.id=u-\(index) routine trace row")
+        })
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
         CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
         try Self.updateTestLog(
             dbURL: dbURL,
@@ -222,17 +318,331 @@ struct CostUsageScannerCodexPriorityCursorTests {
         try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
             epochSeconds: epoch,
             body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
 
-        let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
-        let memo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
+        let resumedTurns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let resumedMemo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
         CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
         let freshTurns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
-        let freshMemo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
-        #expect(turns == freshTurns)
+        #expect(resumedTurns == freshTurns)
+        #expect(resumedTurns.keys.sorted() == ["turn-new", "turn-x"])
+        #expect(!resumedTurns.keys.contains("turn-a"))
+        #expect(resumedMemo.requestSourcesByTurnID["turn-x"]?.keys.contains(1) == true)
+    }
+
+    @Test
+    func `failed fallback cold scan leaves refresh uncommitted until retry succeeds`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer {
+            CostUsageScanner._test_setCodexPriorityBeforeFallbackColdScanHook(databaseURL: dbURL, nil)
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        let epoch = Int64(now.timeIntervalSince1970)
+        var rows: [(epochSeconds: Int64, body: String)] = [
+            (epochSeconds: epoch, body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ]
+        rows.append(contentsOf: (1..<8).map { index in
+            (epochSeconds: epoch, body: "thread_id=t-\(index) turn.id=u-\(index) routine trace row")
+        })
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+        try Self.writeCodexSession(env: env, now: now)
+
+        let initialReport = Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let initialCursor = try #require(initialCache.codexPriorityTurnsCursor)
+        let initialLastScanUnixMs = initialCache.lastScanUnixMs
+        #expect(initialCursor.turns.keys.sorted() == ["turn-a"])
+        #expect(initialCursor.anchors?.map(\.rowID) == [2, 4, 6, 8])
+        #expect(initialCache.codexScanCatchUpPending != true)
+        #expect(initialCache.lastScanUnixMs > 0)
+
+        try Self.updateTestLog(
+            dbURL: dbURL,
+            rowID: 1,
+            body: Self.priorityRequestBody(threadID: "thread-x", turnID: "turn-x"))
+        var faultHookCalls = 0
+        CostUsageScanner._test_setCodexPriorityBeforeFallbackColdScanHook(databaseURL: dbURL) { db in
+            faultHookCalls += 1
+            sqlite3_progress_handler(db, 1, { _ in 1 }, nil)
+        }
+
+        let failedReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            now: now.addingTimeInterval(1))
+        #expect(faultHookCalls > 0)
+        #expect(failedReport.data == initialReport.data)
+        #expect(failedReport.summary == initialReport.summary)
+        let failedCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(failedCache.codexScanCatchUpPending != true)
+        #expect(failedCache.lastScanUnixMs == initialLastScanUnixMs)
+        #expect(failedCache.codexPriorityTurnsCursor == initialCursor)
+        let retainedMemo = try #require(CostUsageScanner._test_codexPriorityTurnsMemoState(forPath: dbURL.path))
+        #expect(retainedMemo.turns == initialCursor.turns)
+
+        CostUsageScanner._test_setCodexPriorityBeforeFallbackColdScanHook(databaseURL: dbURL, nil)
+        Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now.addingTimeInterval(2))
+        let retriedCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let retriedCursor = try #require(retriedCache.codexPriorityTurnsCursor)
+        #expect(retriedCache.codexScanCatchUpPending != true)
+        #expect(retriedCache.lastScanUnixMs > initialLastScanUnixMs)
+        #expect(retriedCursor.turns.keys.sorted() == ["turn-x"])
+        #expect(!retriedCursor.turns.keys.contains("turn-a"))
+    }
+
+    @Test
+    func `fallback fault hook is scoped to its database path`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let faultedDB = env.root.appendingPathComponent("faulted.sqlite")
+        let unaffectedDB = env.root.appendingPathComponent("unaffected.sqlite")
+        for dbURL in [faultedDB, unaffectedDB] {
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+            try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+            let epoch = Int64(Date().timeIntervalSince1970)
+            var rows: [(epochSeconds: Int64, body: String)] = [
+                (epoch, Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+            ]
+            rows.append(contentsOf: (1..<8).map { index in
+                (epoch, "routine trace row \(index)")
+            })
+            try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+            _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+            try Self.updateTestLog(
+                dbURL: dbURL,
+                rowID: 1,
+                body: Self.priorityRequestBody(threadID: "thread-x", turnID: "turn-x"))
+        }
+        defer {
+            CostUsageScanner._test_setCodexPriorityBeforeFallbackColdScanHook(databaseURL: faultedDB, nil)
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: faultedDB.path)
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: unaffectedDB.path)
+        }
+
+        CostUsageScanner._test_setCodexPriorityBeforeFallbackColdScanHook(databaseURL: faultedDB) { db in
+            sqlite3_progress_handler(db, 1, { _ in 1 }, nil)
+        }
+
+        let unaffected = CostUsageScanner.resolveCodexPriorityTurns(databaseURL: unaffectedDB)
+        let faulted = CostUsageScanner.resolveCodexPriorityTurns(databaseURL: faultedDB)
+        #expect(unaffected.validationPending == false)
+        #expect(unaffected.turns.keys.sorted() == ["turn-x"])
+        #expect(faulted.validationPending == true)
+        #expect(faulted.turns.keys.sorted() == ["turn-a"])
+    }
+}
+
+extension CostUsageScannerCodexPriorityCursorTests {
+    @Test
+    func `changed surviving anchor forces a full rescan`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        var rows = (1...8).map { index in
+            (epochSeconds: epoch, body: "routine trace row \(index)")
+        }
+        rows[3].body = Self.priorityRequestBody(threadID: "thread-stale", turnID: "turn-stale")
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        #expect(persisted.anchors?.map(\.rowID) == [2, 4, 6, 8])
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.updateTestLog(dbURL: dbURL, rowID: 4, body: "changed surviving anchor")
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+            epochSeconds: epoch,
+            body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+
+        let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        #expect(turns.keys.sorted() == ["turn-new"])
+        #expect(!turns.keys.contains("turn-stale"))
+    }
+
+    @Test
+    func `losing distributed anchor quorum forces a full rescan`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        var rows: [(epochSeconds: Int64, body: String)] = [
+            (
+                epochSeconds: epoch,
+                body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ]
+        rows.append(contentsOf: (2...8).map { (epochSeconds: epoch, body: "routine trace row \($0)") })
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        #expect(persisted.anchors?.map(\.rowID) == [2, 4, 6, 8])
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.updateTestLog(
+            dbURL: dbURL,
+            rowID: 1,
+            body: Self.priorityRequestBody(threadID: "thread-x", turnID: "turn-x"))
+        try Self.deleteTestLogs(dbURL: dbURL, rowIDs: [2, 4, 6])
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+            epochSeconds: epoch,
+            body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+
+        let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
         #expect(turns.keys.sorted() == ["turn-new", "turn-x"])
         #expect(!turns.keys.contains("turn-a"))
-        #expect(memo.lastRowID == freshMemo.lastRowID)
-        #expect(memo.lastRowID == persisted.lastRowID + 1)
+    }
+
+    @Test
+    func `matched legacy anchor upgrades to distributed anchors`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: (1...8).map {
+            (epochSeconds: epoch, body: "routine trace row \($0)")
+        })
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        var legacy = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        legacy.anchors = nil
+        let legacyPayload = try JSONEncoder().encode(legacy)
+        let legacyJSON = try #require(String(data: legacyPayload, encoding: .utf8))
+        #expect(!legacyJSON.contains("\"anchors\""))
+        legacy = try JSONDecoder().decode(
+            CostUsageScanner.CodexPriorityTurnsPersistedCursor.self,
+            from: legacyPayload)
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(legacy, databaseURL: dbURL)
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+
+        let upgraded = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        #expect(upgraded.anchors?.map(\.rowID) == [2, 4, 6, 8])
+        #expect(upgraded.anchorRowID == legacy.anchorRowID)
+        #expect(upgraded.anchorDigest == legacy.anchorDigest)
+    }
+
+    @Test
+    func `missing legacy anchor remains conservative`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        var rows: [(epochSeconds: Int64, body: String)] = [
+            (
+                epochSeconds: epoch,
+                body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ]
+        rows.append(contentsOf: (2...8).map { (epochSeconds: epoch, body: "routine trace row \($0)") })
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: rows)
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        var legacy = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        legacy.anchors = nil
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.updateTestLog(
+            dbURL: dbURL,
+            rowID: 1,
+            body: Self.priorityRequestBody(threadID: "thread-x", turnID: "turn-x"))
+        try Self.deleteTestLog(dbURL: dbURL, rowID: legacy.anchorRowID)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+            epochSeconds: epoch,
+            body: Self.priorityRequestBody(threadID: "thread-new", turnID: "turn-new"))])
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(legacy, databaseURL: dbURL)
+
+        let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        #expect(turns.keys.sorted() == ["turn-new", "turn-x"])
+        #expect(!turns.keys.contains("turn-a"))
+    }
+
+    @Test
+    func `small databases require every available anchor`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let epoch = Int64(Date().timeIntervalSince1970)
+
+        for rowCount in 1...3 {
+            let dbURL = env.root.appendingPathComponent("small-\(rowCount).sqlite")
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+            defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+            try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+            try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: (1...rowCount).map {
+                (epochSeconds: epoch, body: "routine trace row \($0)")
+            })
+            _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+            var persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+            let anchors = try #require(persisted.anchors)
+            #expect(anchors.count == rowCount)
+            persisted.turns["stale"] = CostUsageScanner.CodexPriorityTurnMetadata(
+                threadID: "stale",
+                turnID: "stale",
+                model: nil,
+                timestamp: nil)
+
+            CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+            try Self.deleteTestLog(dbURL: dbURL, rowID: anchors[0].rowID)
+            if rowCount == 1 {
+                try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [(
+                    epochSeconds: epoch,
+                    body: "replacement row")])
+            }
+            CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+
+            let turns = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+            #expect(!turns.keys.contains("stale"))
+        }
+    }
+
+    @Test
+    func `missing anchor refreshes metadata without an appended tail`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let epoch = Int64(Date().timeIntervalSince1970)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: (1...8).map {
+            (epochSeconds: epoch, body: "routine trace row \($0)")
+        })
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+        let persisted = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        let deletedRowID = try #require(persisted.anchors?.first?.rowID)
+
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        try Self.deleteTestLog(dbURL: dbURL, rowID: deletedRowID)
+        CostUsageScanner.seedCodexPriorityTurnsMemoIfEmpty(persisted, databaseURL: dbURL)
+        _ = CostUsageScanner.codexPriorityTurns(databaseURL: dbURL)
+
+        let refreshed = try #require(CostUsageScanner.codexPriorityTurnsPersistedCursor(databaseURL: dbURL))
+        #expect(refreshed.lastRowID == persisted.lastRowID)
+        #expect(refreshed.anchors?.count == 4)
+        #expect(!((refreshed.anchors ?? []).contains { $0.rowID == deletedRowID }))
     }
 
     @Test
@@ -570,13 +980,14 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(reloaded.lastRowID == 2)
     }
 
+    @discardableResult
     private static func loadCodexDailyReport(
         env: CostUsageTestEnvironment,
         databaseURL: URL,
         since: Date? = nil,
         until: Date? = nil,
         now: Date,
-        forceRescan: Bool = false)
+        forceRescan: Bool = false) -> CostUsageDailyReport
     {
         var options = CostUsageScanner.Options(
             codexSessionsRoot: env.codexSessionsRoot,
@@ -585,7 +996,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
             codexTraceDatabaseURL: databaseURL)
         options.refreshMinIntervalSeconds = 0
         options.forceRescan = forceRescan
-        _ = CostUsageScanner.loadDailyReport(
+        return CostUsageScanner.loadDailyReport(
             provider: .codex,
             since: since ?? now,
             until: until ?? now,
@@ -652,6 +1063,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
             fileIdentity: memo.fileIdentity,
             anchorRowID: memo.anchorRowID,
             anchorDigest: memo.anchorDigest,
+            anchors: memo.anchors,
             turns: memo.turns,
             requestSourcesByTurnID: memo.requestSourcesByTurnID,
             priorityCompletedModelsByTurnID: memo.priorityCompletedModelsByTurnID,
@@ -668,6 +1080,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
             fileIdentity: nil,
             anchorRowID: 0,
             anchorDigest: "",
+            anchors: [],
             turns: [:],
             requestSourcesByTurnID: [:],
             priorityCompletedModelsByTurnID: [:],
@@ -686,6 +1099,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
             fileIdentity: nil,
             anchorRowID: 0,
             anchorDigest: "",
+            anchors: [],
             turns: [:],
             requestSourcesByTurnID: [:],
             priorityCompletedModelsByTurnID: [:],
@@ -724,10 +1138,21 @@ struct CostUsageScannerCodexPriorityCursorTests {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw SQLiteTestError.step }
     }
 
+    private static func deleteTestLogs(dbURL: URL, rowIDs: [Int64]) throws {
+        for rowID in rowIDs {
+            try self.deleteTestLog(dbURL: dbURL, rowID: rowID)
+        }
+    }
+
     private enum SQLiteTestError: Error {
         case open
         case prepare
         case step
+    }
+
+    private struct LegacyCursorProjection: Decodable {
+        var anchorRowID: Int64
+        var anchorDigest: String
     }
 }
 #endif
