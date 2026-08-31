@@ -2286,6 +2286,37 @@ enum CostUsageScanner {
         return out.isEmpty ? nil : out
     }
 
+    private static func validatedPriorityTurns(
+        cache: CostUsageCache,
+        calendar: Calendar) -> [String: CodexPriorityTurnMetadata]
+    {
+        if let resolved = cache.codexResolvedPriorityTurns { return resolved }
+        // Older caches only have a resume cursor. A historical scan may have superseded its
+        // pricing, so adopt only days whose published classification still matches the cursor.
+        let turns = cache.codexPriorityTurnsCursor?.turns ?? [:]
+        let keys = Self.codexPriorityTurnKeys(turns, calendar: calendar)
+        return turns.filter { _, turn in
+            guard let day = Self.codexPriorityDayKey(turn, calendar: calendar) else { return false }
+            return keys[day] == cache.codexPriorityTurnKeys?[day]
+        }
+    }
+
+    private static func mergeResolvedPriorityTurns(
+        existing: [String: CodexPriorityTurnMetadata],
+        new: [String: CodexPriorityTurnMetadata],
+        range: CostUsageDayRange,
+        retainedSinceKey: String,
+        retainedUntilKey: String) -> [String: CodexPriorityTurnMetadata]
+    {
+        var out = existing.filter { _, turn in
+            guard let day = Self.codexPriorityDayKey(turn, calendar: range.calendar) else { return false }
+            return CostUsageDayRange.isInRange(dayKey: day, since: retainedSinceKey, until: retainedUntilKey)
+                && !CostUsageDayRange.isInRange(dayKey: day, since: range.scanSinceKey, until: range.scanUntilKey)
+        }
+        out.merge(new) { _, replacement in replacement }
+        return out
+    }
+
     private static func mergePriorityTurnIDsByDay(
         existing: [String: [String]]?,
         new: [String: [String]],
@@ -5443,7 +5474,7 @@ enum CostUsageScanner {
         else { return nil }
 
         let priorityTurns = if plan.priorityValidationPending {
-            sourceCache.codexPriorityTurnsCursor?.turns ?? plan.priorityTurns
+            Self.validatedPriorityTurns(cache: sourceCache, calendar: range.calendar)
         } else {
             plan.priorityTurns
         }
@@ -5521,12 +5552,15 @@ enum CostUsageScanner {
         // last published cache (including its freshness timestamp and durable priority cursor)
         // untouched so the next refresh retries validation against the same baseline.
         if plan.priorityValidationPending {
+            guard cache.roots == plan.rootsFingerprint,
+                  cache.timeZoneIdentifier == range.calendar.timeZone.identifier
+            else { return CostUsageDailyReport(data: [], summary: nil) }
             return previousReport?.report ?? Self.buildCodexReportFromCache(
                 cache: cache,
                 range: range,
                 modelsDevCatalog: plan.modelsDevCatalog,
                 modelsDevCacheRoot: options.cacheRoot,
-                priorityTurns: cache.codexPriorityTurnsCursor?.turns ?? plan.priorityTurns)
+                priorityTurns: Self.validatedPriorityTurns(cache: cache, calendar: range.calendar))
         }
 
         if plan.shouldRefresh {
@@ -5924,6 +5958,17 @@ enum CostUsageScanner {
                 || cache.files.values.contains { $0.hasBufferedCodexForkRetryLines }
             cache.codexScanCatchUpPending = catchUpPending
             cache.codexPreviousReport = catchUpPending ? previousReport : nil
+            if plan.inspectedPriorityTurns {
+                // Report pricing follows each successful inspected window, including an empty
+                // historical result. The independent live cursor remains suitable for resume.
+                cache.codexResolvedPriorityTurns = Self.mergeResolvedPriorityTurns(
+                    existing: shouldRetainWiderWindow
+                        ? Self.validatedPriorityTurns(cache: cache, calendar: range.calendar) : [:],
+                    new: plan.priorityTurns,
+                    range: range,
+                    retainedSinceKey: retainedSinceKey,
+                    retainedUntilKey: retainedUntilKey)
+            }
             if plan.hasPriorityMetadata {
                 cache.codexPriorityTurnKeys = Self.mergePriorityTurnKeys(
                     existing: shouldRetainWiderWindow ? cache.codexPriorityTurnKeys : nil,

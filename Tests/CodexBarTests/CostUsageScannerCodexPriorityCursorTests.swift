@@ -524,6 +524,120 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(pendingCache.codexPriorityTurnsCursor == initialCursor)
     }
 
+    @Test(arguments: [(false, false), (false, true), (true, false)])
+    func `historical correction survives trace failure and relaunch`(
+        replacementPriority: Bool,
+        legacyCache: Bool) throws
+    {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        let backupURL = env.root.appendingPathComponent("logs_2.backup.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        let historicalDay = try #require(Calendar.current.date(byAdding: .day, value: -10, to: now))
+        let historicalEpoch = Int64(historicalDay.timeIntervalSince1970)
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [
+            (historicalEpoch, Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+            (Int64(now.timeIntervalSince1970), Self.priorityRequestBody(threadID: "outside", turnID: "outside")),
+        ])
+        try Self.writeCodexSession(env: env, now: historicalDay)
+        try Self.writeCodexSession(env: env, now: now, turnID: "outside")
+        let initialReport = Self.loadCodexDailyReport(
+            env: env, databaseURL: dbURL, since: historicalDay, until: now, now: now)
+        let initialHistoricalCost = try #require(initialReport.data.first?.costUSD)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        let initialCursor = try #require(initialCache.codexPriorityTurnsCursor)
+        #expect(initialCursor.turns.keys.sorted() == ["outside", "turn-a"])
+        let outsideKey = CostUsageScanner.CostUsageDayRange.dayKey(from: now)
+        let initialOutside = initialCache.files.filter { $0.value.days[outsideKey] != nil }
+        #expect(!initialOutside.isEmpty)
+
+        try Self.deleteTestLog(dbURL: dbURL, rowID: 1)
+        if replacementPriority {
+            try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [
+                (historicalEpoch, Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a", model: "gpt-5.4")),
+            ])
+        }
+        var correctedReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(1))
+        for _ in 0..<5 where CostUsageStoreAccess.read(cacheRoot: env.cacheRoot).codexScanCatchUpPending == true {
+            correctedReport = Self.loadCodexDailyReport(
+                env: env,
+                databaseURL: dbURL,
+                since: historicalDay,
+                until: historicalDay,
+                now: now.addingTimeInterval(1))
+        }
+        correctedReport = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(1))
+        var correctedCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(correctedCache.codexScanCatchUpPending != true)
+        #expect(correctedReport.summary?.totalTokens == 110)
+        let breakdown = try #require(correctedReport.data.first?.modelBreakdowns?.first)
+        // Pruning does not erase priority evidence already recorded on usage rows.
+        #expect(breakdown.priorityTokens == 110)
+        if replacementPriority {
+            #expect(try #require(breakdown.costUSD) < initialHistoricalCost)
+        }
+        #expect(correctedCache.codexPriorityTurnsCursor == initialCursor)
+        #expect(correctedCache.codexResolvedPriorityTurns?.keys.sorted()
+            == (replacementPriority ? ["outside", "turn-a"] : ["outside"]))
+        #expect(correctedCache.files.filter { $0.value.days[outsideKey] != nil } == initialOutside)
+        let historicalRange = CostUsageScanner.CostUsageDayRange(since: historicalDay, until: historicalDay)
+        let view = CostUsageStoreAccess.readView(cacheRoot: env.cacheRoot, calendar: .current, purpose: .report)
+        #expect(view.dailyReport(range: historicalRange, cacheRoot: env.cacheRoot).summary == correctedReport.summary)
+        #expect(view.projects(range: historicalRange, cacheRoot: env.cacheRoot).first?.totalCostUSD
+            == correctedReport.summary?.totalCostUSD)
+        #expect(view.sessions(range: historicalRange, cacheRoot: env.cacheRoot, roots: [env.codexSessionsRoot])
+            .first?.costUSD == correctedReport.summary?.totalCostUSD)
+        if legacyCache {
+            correctedCache.codexResolvedPriorityTurns = nil
+            #expect(!CostUsageStoreAccess.replace(cacheRoot: env.cacheRoot, cache: correctedCache).catchUpRequired)
+            correctedCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        }
+
+        try FileManager.default.moveItem(at: dbURL, to: backupURL)
+        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        for relaunched in [false, true] {
+            if relaunched { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+            let pending = Self.loadCodexDailyReport(
+                env: env,
+                databaseURL: dbURL,
+                since: historicalDay,
+                until: historicalDay,
+                now: now.addingTimeInterval(2))
+            #expect(pending.data == correctedReport.data)
+            #expect(pending.summary == correctedReport.summary)
+            #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == correctedCache)
+            let outsideReport = Self.loadCodexDailyReport(
+                env: env, databaseURL: dbURL, now: now.addingTimeInterval(2))
+            #expect(outsideReport.data.first?.modelBreakdowns?.first?.priorityTokens == 110)
+            #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == correctedCache)
+        }
+        try FileManager.default.removeItem(at: dbURL)
+        try FileManager.default.moveItem(at: backupURL, to: dbURL)
+        let retried = Self.loadCodexDailyReport(
+            env: env,
+            databaseURL: dbURL,
+            since: historicalDay,
+            until: historicalDay,
+            now: now.addingTimeInterval(3))
+        #expect(retried.data == correctedReport.data)
+        #expect(retried.summary == correctedReport.summary)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot).lastScanUnixMs > correctedCache.lastScanUnixMs)
+    }
+
     @Test
     func `fallback fault hook is scoped to its database path`() throws {
         let env = try CostUsageTestEnvironment()
@@ -563,6 +677,68 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(unaffected.turns.keys.sorted() == ["turn-x"])
         #expect(faulted.validationPending == true)
         #expect(faulted.turns.keys.sorted() == ["turn-a"])
+    }
+
+    @Test(arguments: [false, true])
+    func `trace failure never borrows a different report scope`(changedTimeZone: Bool) throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let other = try CostUsageTestEnvironment()
+        defer { other.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        let backupURL = env.root.appendingPathComponent("logs_2.backup.sqlite")
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        try CostUsageScannerCodexPriorityTests.insertTestLogs(dbURL: dbURL, rows: [
+            (Int64(now.timeIntervalSince1970), Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a")),
+        ])
+        try Self.writeCodexSession(env: env, now: now)
+        let initial = Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now)
+        #expect(initial.summary?.totalTokens == 110)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        try FileManager.default.moveItem(at: dbURL, to: backupURL)
+        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        var calendar = Calendar.current
+        if changedTimeZone {
+            calendar.timeZone = try #require(TimeZone(identifier:
+                calendar.timeZone.identifier == "Pacific/Honolulu" ? "Asia/Tokyo" : "Pacific/Honolulu"))
+        }
+        var options = CostUsageScanner.Options(
+            codexSessionsRoot: changedTimeZone ? env.codexSessionsRoot : other.codexSessionsRoot,
+            claudeProjectsRoots: [env.claudeProjectsRoot],
+            cacheRoot: env.cacheRoot,
+            codexTraceDatabaseURL: dbURL,
+            calendar: calendar)
+        options.refreshMinIntervalSeconds = 0
+        let pending = CostUsageScanner.loadDailyReport(
+            provider: .codex, since: now, until: now, now: now.addingTimeInterval(1), options: options)
+        #expect(pending.data.isEmpty)
+        #expect(pending.summary == nil)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == initialCache)
+    }
+
+    @Test
+    func `validated empty pricing evidence persists independently of the resume cursor`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        var cache = CostUsageCache()
+        cache.codexResolvedPriorityTurns = ["turn-a": .init(
+            threadID: "thread-a", turnID: "turn-a", model: "gpt-5.5", timestamp: "1788192000")]
+        #expect(!CostUsageStoreAccess.replace(cacheRoot: env.cacheRoot, cache: cache).catchUpRequired)
+        let loaded = CostUsageStoreAccess.load(cacheRoot: env.cacheRoot, calendar: .current)
+        defer { loaded.release() }
+        cache = loaded.cache
+        cache.codexResolvedPriorityTurns = [:]
+        let result = CostUsageStoreAccess.save(
+            store: loaded.store,
+            cache: cache,
+            calendar: .current,
+            requestedScanWindow: (sinceKey: "2026-08-01", untilKey: "2026-08-31"),
+            skipIdenticalContent: true,
+            receipt: loaded.receipt)
+        #expect(!result.catchUpRequired)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot).codexResolvedPriorityTurns == [:])
     }
 }
 
@@ -1132,9 +1308,13 @@ extension CostUsageScannerCodexPriorityCursorTests {
             options: options)
     }
 
-    private static func priorityRequestBody(threadID: String, turnID: String) -> String {
+    private static func priorityRequestBody(
+        threadID: String,
+        turnID: String,
+        model: String = "gpt-5.5") -> String
+    {
         "thread_id=\(threadID) turn.id=\(turnID) websocket request: "
-            + #"{"type":"response.create","model":"gpt-5.5","service_tier":"priority"}"#
+            + #"{"type":"response.create","model":"\#(model)","service_tier":"priority"}"#
     }
 
     private static func completedBody(turnID: String, model: String) -> String {
@@ -1142,24 +1322,29 @@ extension CostUsageScannerCodexPriorityCursorTests {
             + #"{"type":"response.completed","response":{"model":"\#(model)"}}"#
     }
 
-    private static func writeCodexSession(env: CostUsageTestEnvironment, now: Date) throws {
+    private static func writeCodexSession(
+        env: CostUsageTestEnvironment,
+        now: Date,
+        turnID: String = "turn-a") throws
+    {
         let iso = env.isoString(for: now)
         let lines = [
-            #"{"type":"session_meta","timestamp":"\#(iso)","payload":{"session_id":"cursor-skip"}}"#,
+            #"{"type":"session_meta","timestamp":"\#(iso)","payload":{"session_id":"cursor-skip-\#(turnID)"}}"#,
             #"{"type":"turn_context","timestamp":"\#(iso)","payload":{"model":"gpt-5.5"}}"#,
-            #"{"type":"event_msg","timestamp":"\#(iso)","payload":{"type":"task_started","turn_id":"turn-a"}}"#,
+            #"{"type":"event_msg","timestamp":"\#(iso)","payload":{"type":"task_started","turn_id":"\#(turnID)"}}"#,
             #"{"type":"event_msg","timestamp":"\#(iso)","payload":{"type":"token_count","info":"#
                 + #"{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10},"#
                 + #""model":"gpt-5.5"}}}"#,
         ]
         _ = try env.writeCodexSessionFile(
             day: now,
-            filename: "cursor-skip.jsonl",
+            filename: "cursor-skip-\(turnID).jsonl",
             contents: lines.joined(separator: "\n") + "\n")
     }
 
     private static func cacheRequiringPricingMetadataMigration(_ cache: CostUsageCache) -> CostUsageCache {
         var migrationCache = cache
+        migrationCache.codexResolvedPriorityTurns = nil
         for path in migrationCache.files.keys {
             guard var usage = migrationCache.files[path] else { continue }
             usage.codexCostCacheComplete = false

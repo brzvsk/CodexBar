@@ -1182,6 +1182,7 @@ extension CostUsageStoreTests {
         #expect(await current.fetchMetadata() == metadata)
         #expect(await current.rebuildCount == 0)
         #expect(cursor.anchors == nil)
+        #expect(loaded.codexResolvedPriorityTurns == nil)
         #expect(cursor.anchorRowID == 8)
         #expect(cursor.anchorDigest == "legacy-terminal-digest")
         #expect(cursor.turns.keys.sorted() == ["turn-a"])
