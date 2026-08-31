@@ -5351,10 +5351,13 @@ enum CostUsageScanner {
                     databaseURL: resolvedPriorityDatabaseURL)
             }
         }
+        let previouslyObservedDatabase = cache.codexPriorityMetadataKey
+            == "sqlite:\(resolvedPriorityDatabaseURL.standardizedFileURL.path)"
         let priorityResolution = shouldInspectPriorityTurns ? Self.resolveCodexPriorityTurns(
             databaseURL: resolvedPriorityDatabaseURL,
             sinceDayKey: range.scanSinceKey,
-            untilDayKey: range.scanUntilKey) : nil
+            untilDayKey: range.scanUntilKey,
+            expectExistingDatabase: previouslyObservedDatabase) : nil
         let priorityTurns = priorityResolution?.turns
             ?? Self.validatedPriorityTurns(cache: cache, calendar: range.calendar)
         let priorityValidationPending = priorityResolution?.validationPending ?? false

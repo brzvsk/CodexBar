@@ -313,11 +313,13 @@ extension CostUsageScanner {
     static func resolveCodexPriorityTurns(
         databaseURL: URL? = nil,
         sinceDayKey: String? = nil,
-        untilDayKey: String? = nil) -> CodexPriorityTurnsResolution
+        untilDayKey: String? = nil,
+        expectExistingDatabase: Bool = false) -> CodexPriorityTurnsResolution
     {
         let url = self.resolvedCodexPriorityDatabaseURL(databaseURL)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return CodexPriorityTurnsResolution(turns: [:], validationPending: false)
+            // A missing optional source is normal until this same path has supplied cached evidence.
+            return CodexPriorityTurnsResolution(turns: [:], validationPending: expectExistingDatabase)
         }
 
         #if canImport(SQLite3)

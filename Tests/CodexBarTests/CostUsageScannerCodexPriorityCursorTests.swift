@@ -524,10 +524,16 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(pendingCache.codexPriorityTurnsCursor == initialCursor)
     }
 
-    @Test(arguments: [(false, false), (false, true), (true, false)])
+    @Test(arguments: [
+        (false, false, false, false), (false, true, false, false), (true, false, false, false),
+        (false, false, true, false), (false, true, true, false), (true, false, true, false),
+        (true, false, false, true), (true, false, true, true),
+    ])
     func `historical correction survives trace failure and relaunch`(
         replacementPriority: Bool,
-        legacyCache: Bool) throws
+        legacyCache: Bool,
+        missingTraceFile: Bool,
+        forceRescan: Bool) throws
     {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
@@ -624,7 +630,9 @@ struct CostUsageScannerCodexPriorityCursorTests {
         }
 
         try FileManager.default.moveItem(at: dbURL, to: backupURL)
-        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        if !missingTraceFile {
+            try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        }
         for relaunched in [false, true] {
             if relaunched { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
             let pending = Self.loadCodexDailyReport(
@@ -632,7 +640,8 @@ struct CostUsageScannerCodexPriorityCursorTests {
                 databaseURL: dbURL,
                 since: historicalDay,
                 until: historicalDay,
-                now: now.addingTimeInterval(2))
+                now: now.addingTimeInterval(2),
+                forceRescan: forceRescan)
             #expect(pending.data == correctedReport.data)
             #expect(pending.summary == correctedReport.summary)
             #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == correctedCache)
@@ -641,7 +650,7 @@ struct CostUsageScannerCodexPriorityCursorTests {
             #expect(outsideReport.data.first?.modelBreakdowns?.first?.priorityTokens == 110)
             #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == correctedCache)
         }
-        try FileManager.default.removeItem(at: dbURL)
+        if !missingTraceFile { try FileManager.default.removeItem(at: dbURL) }
         try FileManager.default.moveItem(at: backupURL, to: dbURL)
         let retried = Self.loadCodexDailyReport(
             env: env,
@@ -695,8 +704,11 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(faulted.turns.keys.sorted() == ["turn-a"])
     }
 
-    @Test(arguments: [false, true])
-    func `trace failure never borrows a different report scope`(changedTimeZone: Bool) throws {
+    @Test(arguments: [false, true], [false, true])
+    func `trace failure never borrows a different report scope`(
+        changedTimeZone: Bool,
+        missingTraceFile: Bool) throws
+    {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }
         let other = try CostUsageTestEnvironment()
@@ -714,7 +726,9 @@ struct CostUsageScannerCodexPriorityCursorTests {
         #expect(initial.summary?.totalTokens == 110)
         let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
         try FileManager.default.moveItem(at: dbURL, to: backupURL)
-        try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        if !missingTraceFile {
+            try FileManager.default.createDirectory(at: dbURL, withIntermediateDirectories: false)
+        }
         var calendar = Calendar.current
         if changedTimeZone {
             calendar.timeZone = try #require(TimeZone(identifier:
@@ -729,9 +743,68 @@ struct CostUsageScannerCodexPriorityCursorTests {
         options.refreshMinIntervalSeconds = 0
         let pending = CostUsageScanner.loadDailyReport(
             provider: .codex, since: now, until: now, now: now.addingTimeInterval(1), options: options)
-        #expect(pending.data.isEmpty)
-        #expect(pending.summary == nil)
-        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == initialCache)
+        if changedTimeZone, missingTraceFile {
+            // A new day partition rejects the old cache and can freshly scan native usage without traces.
+            #expect(pending.summary?.totalTokens == 110)
+            #expect(pending.summary != initial.summary)
+            #expect(pending.data.first?.modelBreakdowns?.first?.priorityTokens == nil)
+            let updated = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot, calendar: calendar)
+            #expect(updated.timeZoneIdentifier == calendar.timeZone.identifier)
+            #expect(updated.codexResolvedPriorityTurns == [:])
+            #expect(updated.codexPriorityTurnsCursor == nil)
+        } else {
+            #expect(pending.data.isEmpty)
+            #expect(pending.summary == nil)
+            #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot) == initialCache)
+        }
+    }
+
+    @Test
+    func `never observed trace paths do not block repeated usage scans`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let missingURL = env.root.appendingPathComponent("never-created.sqlite")
+        let now = Date()
+        try Self.writeCodexSession(env: env, now: now)
+        let first = Self.loadCodexDailyReport(env: env, databaseURL: missingURL, now: now)
+        #expect(first.summary?.totalTokens == 110)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(initialCache.codexResolvedPriorityTurns == [:])
+        #expect(initialCache.codexPriorityMetadataKey == "missing:\(missingURL.path)")
+
+        try Self.writeCodexSession(env: env, now: now, turnID: "turn-b")
+        let second = Self.loadCodexDailyReport(
+            env: env, databaseURL: missingURL, now: now.addingTimeInterval(1), forceRescan: true)
+        #expect(second.summary?.totalTokens == 220)
+        #expect(CostUsageStoreAccess.read(cacheRoot: env.cacheRoot).lastScanUnixMs > initialCache.lastScanUnixMs)
+    }
+
+    @Test
+    func `new missing trace path does not inherit the old path requirement`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+        let dbURL = env.root.appendingPathComponent("logs_2.sqlite")
+        let missingURL = env.root.appendingPathComponent("new-missing.sqlite")
+        CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path)
+        defer { CostUsageScanner._test_resetCodexPriorityTurnsMemo(forPath: dbURL.path) }
+        try CostUsageScannerCodexPriorityTests.createTestLogsDatabase(at: dbURL)
+        let now = Date()
+        try CostUsageScannerCodexPriorityTests.insertTestLog(
+            dbURL: dbURL,
+            timestamp: ISO8601DateFormatter().string(from: now),
+            body: Self.priorityRequestBody(threadID: "thread-a", turnID: "turn-a"))
+        try Self.writeCodexSession(env: env, now: now)
+        _ = Self.loadCodexDailyReport(env: env, databaseURL: dbURL, now: now)
+        let initialCache = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(initialCache.codexPriorityMetadataKey == "sqlite:\(dbURL.path)")
+
+        try Self.writeCodexSession(env: env, now: now, turnID: "turn-b")
+        let report = Self.loadCodexDailyReport(
+            env: env, databaseURL: missingURL, now: now.addingTimeInterval(1))
+        #expect(report.summary?.totalTokens == 220)
+        let updated = CostUsageStoreAccess.read(cacheRoot: env.cacheRoot)
+        #expect(updated.codexPriorityMetadataKey == "missing:\(missingURL.path)")
+        #expect(updated.lastScanUnixMs > initialCache.lastScanUnixMs)
     }
 
     @Test
