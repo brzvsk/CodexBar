@@ -2051,7 +2051,7 @@ extension CostUsageStoreTests {
         #expect(await store.upsertFile(Self.file(path: "/rollouts/one.jsonl", day: "2026-08-01")))
 
         // The CLI cost command scans through CostUsageFetcher and therefore opens its own
-        // writable store connection. Hold that cross-process lock past the 5s busy timeout.
+        // writable store connection. Hold that cross-process lock past this fixture's short busy timeout.
         let holder = try SQLiteTestConnection(url: store.databaseURL)
         try holder.execute("BEGIN IMMEDIATE")
         try holder.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('holder', '1')")
