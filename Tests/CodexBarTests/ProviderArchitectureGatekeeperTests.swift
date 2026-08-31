@@ -302,6 +302,29 @@ struct ProviderArchitectureGatekeeperTests {
     }
 
     @Test
+    func `provider candidate prefilter preserves recognized lexical shapes`() {
+        let providerIDs: Set = ["claude", "codex", "cursor", "gemini"]
+        let fixtures: [(source: String, expected: Set<String>)] = [
+            ("makeRow(provider: .claude)", ["claude"]),
+            ("let provider = UsageProvider.codex", ["codex"]),
+            (#"let provider = "cursor""#, ["cursor"]),
+            (#"let provider = ".gemini.""#, ["gemini"]),
+            (#"let provider = "\(choose(.claude))""#, ["claude"]),
+            (#"let url = "https://example.com/codex""#, []),
+            ("let value = object.cursorBudget", []),
+            ("let value = unrelated", []),
+        ]
+
+        for fixture in fixtures {
+            let literals = Self.quotedStringLiterals(in: fixture.source)
+            #expect(Self.providerIDCandidates(
+                in: fixture.source,
+                quotedLiterals: literals,
+                providerIDs: providerIDs) == fixture.expected)
+        }
+    }
+
+    @Test
     func `provider reference scanner sees through inline block comments`() {
         let assignment = "let provider: UsageProvider = /* fallback */ .claude"
         let labeled = "choose(provider: /* fallback */ .claude)"
@@ -4080,12 +4103,16 @@ struct ProviderArchitectureGatekeeperTests {
             let code = self.codeBeforeLineComment(line)
             guard !code.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
             let quotedLiterals = self.quotedStringLiterals(in: code)
+            let providerIDCandidates = self.providerIDCandidates(
+                in: code,
+                quotedLiterals: quotedLiterals,
+                providerIDs: providerIDs)
             let plainStringRanges = quotedLiterals.compactMap { literal -> Range<String.Index>? in
                 code[literal.range].contains("\\(") ? nil : literal.range
             }
             var matches: [String] = []
             var newlyRecognizedMatches: [String] = []
-            for providerID in providerIDs {
+            for providerID in providerIDs where providerIDCandidates.contains(providerID) {
                 for strength in self.dottedProviderReferenceStrengths(
                     providerID,
                     in: code,
@@ -4099,15 +4126,17 @@ struct ProviderArchitectureGatekeeperTests {
                 }
             }
             for literal in quotedLiterals {
-                for providerID in providerIDs where self.isProviderIDLiteral(
-                    providerID,
-                    literal: literal.value,
-                    range: literal.range,
-                    line: code,
-                    statement: statementContexts[index])
-                {
-                    matches.append(providerID)
-                }
+                let normalizedLiteral = literal.value.lowercased()
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                guard providerIDCandidates.contains(normalizedLiteral),
+                      self.isProviderIDLiteral(
+                          normalizedLiteral,
+                          literal: literal.value,
+                          range: literal.range,
+                          line: code,
+                          statement: statementContexts[index])
+                else { continue }
+                matches.append(normalizedLiteral)
             }
             guard !matches.isEmpty else { return [] }
             return [ProviderReference(
@@ -4115,6 +4144,38 @@ struct ProviderArchitectureGatekeeperTests {
                 providerOccurrences: matches,
                 newlyRecognizedProviderOccurrences: newlyRecognizedMatches)]
         }
+    }
+
+    private static func providerIDCandidates(
+        in line: String,
+        quotedLiterals: [QuotedStringLiteral],
+        providerIDs: Set<String>) -> Set<String>
+    {
+        var candidates: Set<String> = []
+        var searchStart = line.startIndex
+        while let dot = line[searchStart...].firstIndex(of: ".") {
+            let identifierStart = line.index(after: dot)
+            var identifierEnd = identifierStart
+            while identifierEnd < line.endIndex, self.isIdentifierCharacter(line[identifierEnd]) {
+                identifierEnd = line.index(after: identifierEnd)
+            }
+            if identifierStart < identifierEnd {
+                let identifier = String(line[identifierStart..<identifierEnd])
+                if providerIDs.contains(identifier) {
+                    candidates.insert(identifier)
+                }
+            }
+            searchStart = identifierEnd
+        }
+
+        for literal in quotedLiterals {
+            let normalizedLiteral = literal.value.lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            if providerIDs.contains(normalizedLiteral) {
+                candidates.insert(normalizedLiteral)
+            }
+        }
+        return candidates
     }
 
     private enum ProviderReferenceStrength: Equatable {
