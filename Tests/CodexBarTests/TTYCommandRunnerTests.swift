@@ -6,13 +6,9 @@ import Testing
 struct TTYCommandRunnerEnvTests {
     private static let harnessPTYTimeout: TimeInterval = 10
 
-    private struct FastExitIterationError: Error, CustomStringConvertible {
+    private struct FastExitIterationOutcome: Sendable {
         let iteration: Int
-        let details: String
-
-        var description: String {
-            "PTY fast-exit iteration \(self.iteration) failed: \(self.details)"
-        }
+        let failureDetails: String?
     }
 
     private final class CallbackCounter: @unchecked Sendable {
@@ -259,19 +255,54 @@ struct TTYCommandRunnerEnvTests {
     }
 
     @Test
-    func `fast process exit drains buffered PTY output`() async throws {
+    func `fast process exit drains buffered PTY output`() async {
         let iterationCount = 50
         let concurrencyLimit = 4
 
-        let completedIterations = try await withThrowingTaskGroup(of: Int.self, returning: [Int].self) { group in
+        let outcomes = await Self.runFastExitIterations(
+            iterationCount: iterationCount,
+            concurrencyLimit: concurrencyLimit)
+        { iteration in
+            Self.runFastExitIteration(iteration)
+        }
+
+        #expect(outcomes.map(\.iteration).sorted() == Array(0..<iterationCount))
+        #expect(TTYCommandRunner._test_trackedProcessCount() == 0)
+        for outcome in outcomes.sorted(by: { $0.iteration < $1.iteration }) {
+            #expect(
+                outcome.failureDetails == nil,
+                "PTY fast-exit iteration \(outcome.iteration) failed: \(outcome.failureDetails ?? "unknown failure")")
+        }
+    }
+
+    @Test
+    func `fast exit scheduler drains all iterations after a failure`() async {
+        let iterationCount = 50
+        let outcomes = await Self.runFastExitIterations(iterationCount: iterationCount, concurrencyLimit: 4) {
+            iteration in
+            FastExitIterationOutcome(
+                iteration: iteration,
+                failureDetails: iteration == 7 ? "injected missing output" : nil)
+        }
+
+        #expect(outcomes.map(\.iteration).sorted() == Array(0..<iterationCount))
+        #expect(outcomes.compactMap { $0.failureDetails == nil ? nil : $0.iteration } == [7])
+    }
+
+    private static func runFastExitIterations(
+        iterationCount: Int,
+        concurrencyLimit: Int,
+        operation: @escaping @Sendable (Int) -> FastExitIterationOutcome) async -> [FastExitIterationOutcome]
+    {
+        await withTaskGroup(of: FastExitIterationOutcome.self, returning: [FastExitIterationOutcome].self) { group in
             var nextIteration = 0
-            var completed: [Int] = []
+            var completed: [FastExitIterationOutcome] = []
 
             func addNextIteration() {
                 let iteration = nextIteration
                 nextIteration += 1
                 group.addTask {
-                    try Self.runFastExitIteration(iteration)
+                    operation(iteration)
                 }
             }
 
@@ -279,8 +310,8 @@ struct TTYCommandRunnerEnvTests {
                 addNextIteration()
             }
 
-            while let iteration = try await group.next() {
-                completed.append(iteration)
+            while let outcome = await group.next() {
+                completed.append(outcome)
                 if nextIteration < iterationCount {
                     addNextIteration()
                 }
@@ -288,12 +319,9 @@ struct TTYCommandRunnerEnvTests {
 
             return completed
         }
-
-        #expect(completedIterations.sorted() == Array(0..<iterationCount))
-        #expect(TTYCommandRunner._test_trackedProcessCount() == 0)
     }
 
-    private static func runFastExitIteration(_ iteration: Int) throws -> Int {
+    private static func runFastExitIteration(_ iteration: Int) -> FastExitIterationOutcome {
         let expected = "pty-drain-race"
         let runner = TTYCommandRunner()
 
@@ -309,16 +337,13 @@ struct TTYCommandRunnerEnvTests {
                     settleAfterStop: 0,
                     returnOnEmptyProcessExit: true))
             let clean = result.text.replacingOccurrences(of: "\r", with: "")
-            guard clean.contains(expected) else {
-                throw FastExitIterationError(
-                    iteration: iteration,
-                    details: "PTY output was missing; completion: \(result.completion)")
-            }
-            return iteration
-        } catch let error as FastExitIterationError {
-            throw error
+            return FastExitIterationOutcome(
+                iteration: iteration,
+                failureDetails: clean.contains(expected)
+                    ? nil
+                    : "PTY output was missing; completion: \(result.completion)")
         } catch {
-            throw FastExitIterationError(iteration: iteration, details: String(describing: error))
+            return FastExitIterationOutcome(iteration: iteration, failureDetails: String(describing: error))
         }
     }
 
