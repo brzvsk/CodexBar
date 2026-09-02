@@ -278,12 +278,14 @@ struct TTYCommandRunnerEnvTests {
     @Test
     func `fast exit scheduler drains all iterations after a failure`() async {
         let iterationCount = 50
-        let outcomes = await Self.runFastExitIterations(iterationCount: iterationCount, concurrencyLimit: 4) {
-            iteration in
-            FastExitIterationOutcome(
-                iteration: iteration,
-                failureDetails: iteration == 7 ? "injected missing output" : nil)
-        }
+        let outcomes = await Self.runFastExitIterations(
+            iterationCount: iterationCount,
+            concurrencyLimit: 4,
+            operation: { iteration in
+                FastExitIterationOutcome(
+                    iteration: iteration,
+                    failureDetails: iteration == 7 ? "injected missing output" : nil)
+            })
 
         #expect(outcomes.map(\.iteration).sorted() == Array(0..<iterationCount))
         #expect(outcomes.compactMap { $0.failureDetails == nil ? nil : $0.iteration } == [7])
@@ -298,7 +300,7 @@ struct TTYCommandRunnerEnvTests {
             var nextIteration = 0
             var completed: [FastExitIterationOutcome] = []
 
-            func addNextIteration() {
+            for _ in 0..<min(iterationCount, concurrencyLimit) {
                 let iteration = nextIteration
                 nextIteration += 1
                 group.addTask {
@@ -306,14 +308,14 @@ struct TTYCommandRunnerEnvTests {
                 }
             }
 
-            for _ in 0..<min(iterationCount, concurrencyLimit) {
-                addNextIteration()
-            }
-
             while let outcome = await group.next() {
                 completed.append(outcome)
                 if nextIteration < iterationCount {
-                    addNextIteration()
+                    let iteration = nextIteration
+                    nextIteration += 1
+                    group.addTask {
+                        operation(iteration)
+                    }
                 }
             }
 
