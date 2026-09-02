@@ -303,7 +303,8 @@ struct ProviderArchitectureGatekeeperTests {
 
     @Test
     func `provider candidate prefilter preserves recognized lexical shapes`() {
-        let providerIDs: Set = ["claude", "codex", "cursor", "gemini"]
+        let providerIDs: Set = ["claude", "codex", "cursor", "gemini", "foo-bar", "foo.bar", "🦞"]
+        let exactDottedCandidates = Self.exactDottedProviderIDCandidates(providerIDs)
         let fixtures: [(source: String, expected: Set<String>)] = [
             ("makeRow(provider: .claude)", ["claude"]),
             ("let provider = UsageProvider.codex", ["codex"]),
@@ -312,6 +313,9 @@ struct ProviderArchitectureGatekeeperTests {
             (#"let provider = "\(choose(.claude))""#, ["claude"]),
             (#"let url = "https://example.com/codex""#, []),
             ("let value = object.cursorBudget", []),
+            ("return .foo-bar", ["foo-bar"]),
+            ("return .foo.bar", ["foo.bar"]),
+            ("return .🦞", ["🦞"]),
             ("let value = unrelated", []),
         ]
 
@@ -320,8 +324,30 @@ struct ProviderArchitectureGatekeeperTests {
             #expect(Self.providerIDCandidates(
                 in: fixture.source,
                 quotedLiterals: literals,
-                providerIDs: providerIDs) == fixture.expected)
+                providerIDs: providerIDs,
+                exactDottedCandidates: exactDottedCandidates) == fixture.expected)
         }
+    }
+
+    @Test
+    func `provider reference scanner preserves symbolic provider IDs`() {
+        for providerID in ["foo-bar", "foo.bar", "🦞"] {
+            let dotted = Self.providerReferences(in: "return .\(providerID)", providerIDs: [providerID])
+            let literal = Self.providerReferences(in: "return \"\(providerID)\"", providerIDs: [providerID])
+            let suffixed = Self.providerReferences(in: "return .\(providerID)Suffix", providerIDs: [providerID])
+            let quoted = Self.providerReferences(
+                in: "let value = \"prefix .\(providerID) suffix\"",
+                providerIDs: [providerID])
+
+            #expect(dotted.first?.providerIDs == [providerID])
+            #expect(literal.first?.providerIDs == [providerID])
+            #expect(suffixed.isEmpty)
+            #expect(quoted.isEmpty)
+        }
+
+        #expect(Self.providerReferences(in: "return .", providerIDs: [""]).first?.providerIDs == [""])
+        #expect(Self.providerReferences(in: "return .member", providerIDs: [""]).isEmpty)
+        #expect(Self.providerReferences(in: "return \"\"", providerIDs: [""]).isEmpty)
     }
 
     @Test
@@ -4099,6 +4125,7 @@ struct ProviderArchitectureGatekeeperTests {
     private static func providerReferences(in source: String, providerIDs: Set<String>) -> [ProviderReference] {
         let lines = source.components(separatedBy: .newlines)
         let statementContexts = self.statementContexts(for: lines)
+        let exactDottedCandidates = self.exactDottedProviderIDCandidates(providerIDs)
         return lines.enumerated().flatMap { index, line -> [ProviderReference] in
             let code = self.codeBeforeLineComment(line)
             guard !code.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
@@ -4106,7 +4133,8 @@ struct ProviderArchitectureGatekeeperTests {
             let providerIDCandidates = self.providerIDCandidates(
                 in: code,
                 quotedLiterals: quotedLiterals,
-                providerIDs: providerIDs)
+                providerIDs: providerIDs,
+                exactDottedCandidates: exactDottedCandidates)
             let plainStringRanges = quotedLiterals.compactMap { literal -> Range<String.Index>? in
                 code[literal.range].contains("\\(") ? nil : literal.range
             }
@@ -4146,10 +4174,22 @@ struct ProviderArchitectureGatekeeperTests {
         }
     }
 
+    private static func exactDottedProviderIDCandidates(
+        _ providerIDs: Set<String>) -> [(providerID: String, needle: String)]
+    {
+        providerIDs.compactMap { providerID in
+            guard providerID.isEmpty || providerID.contains(where: { !self.isIdentifierCharacter($0) }) else {
+                return nil
+            }
+            return (providerID, ".\(providerID)")
+        }
+    }
+
     private static func providerIDCandidates(
         in line: String,
         quotedLiterals: [QuotedStringLiteral],
-        providerIDs: Set<String>) -> Set<String>
+        providerIDs: Set<String>,
+        exactDottedCandidates: [(providerID: String, needle: String)]) -> Set<String>
     {
         var candidates: Set<String> = []
         var searchStart = line.startIndex
@@ -4166,6 +4206,12 @@ struct ProviderArchitectureGatekeeperTests {
                 }
             }
             searchStart = identifierEnd
+        }
+
+        // This is only candidate admission. The unchanged dotted scanner below rechecks plain-string ranges,
+        // identifier boundaries, and policy positions before producing a reference.
+        for candidate in exactDottedCandidates where line.contains(candidate.needle) {
+            candidates.insert(candidate.providerID)
         }
 
         for literal in quotedLiterals {
