@@ -250,7 +250,7 @@ private struct ProviderSwitcherRow: View {
             }
             if self.showsTimestamp {
                 Spacer(minLength: 6)
-                Text(WidgetFormat.updateAge(self.updatedAt))
+                WidgetUpdateAgeText(updatedAt: self.updatedAt)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing)
@@ -803,10 +803,20 @@ private struct HeaderView: View {
                 .font(.body)
                 .fontWeight(.semibold)
             Spacer()
-            Text(WidgetFormat.updateAge(self.updatedAt))
+            WidgetUpdateAgeText(updatedAt: self.updatedAt)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+private struct WidgetUpdateAgeText: View {
+    let updatedAt: Date
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            Text(WidgetFormat.updateAge(self.updatedAt, now: context.date))
         }
     }
 }
