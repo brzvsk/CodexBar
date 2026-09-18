@@ -197,6 +197,9 @@ enum CompactMetricFormatter {
                     label: "Extra usage balance",
                     detail: nil)
             }
+            if let balance = WidgetBalanceFormatter.providerBalance(for: entry) {
+                return CompactMetricDisplay(value: balance.value, label: balance.title, detail: nil)
+            }
             let value = entry.creditsRemaining.map(WidgetFormat.credits) ?? "—"
             return CompactMetricDisplay(value: value, label: "Credits left", detail: nil)
         case .todayCost:
@@ -247,7 +250,7 @@ private struct ProviderSwitcherRow: View {
             }
             if self.showsTimestamp {
                 Spacer(minLength: 6)
-                Text(self.updatedAt, style: .relative)
+                Text(WidgetFormat.updateAge(self.updatedAt))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing)
@@ -316,6 +319,9 @@ private struct SwitcherSmallUsageView: View {
                     percentLeft: codeReview,
                     color: WidgetColors.color(for: self.entry.provider))
             }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
+            }
             if let token = WidgetUsageRow.compactTokenUsage(for: self.entry) {
                 ValueLine(
                     title: WidgetFormat.tokenRowTitle(
@@ -350,6 +356,9 @@ private struct SwitcherMediumUsageView: View {
             }
             if let credits = entry.creditsRemaining {
                 ValueLine(title: Text("Credits"), value: WidgetFormat.credits(credits))
+            }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
             }
             if let token = entry.tokenUsage {
                 ValueLine(
@@ -388,6 +397,9 @@ private struct SwitcherLargeUsageView: View {
             }
             if let credits = entry.creditsRemaining {
                 ValueLine(title: Text("Credits"), value: WidgetFormat.credits(credits))
+            }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
             }
             if let token = entry.tokenUsage {
                 VStack(alignment: .leading, spacing: 4) {
@@ -444,6 +456,9 @@ private struct SmallUsageView: View {
                     percentLeft: codeReview,
                     color: WidgetColors.color(for: self.entry.provider))
             }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
+            }
             if let token = WidgetUsageRow.compactTokenUsage(for: self.entry) {
                 ValueLine(
                     title: WidgetFormat.tokenRowTitle(
@@ -479,6 +494,9 @@ private struct MediumUsageView: View {
             }
             if let credits = entry.creditsRemaining {
                 ValueLine(title: Text("Credits"), value: WidgetFormat.credits(credits))
+            }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
             }
             if let token = entry.tokenUsage {
                 ValueLine(
@@ -518,6 +536,9 @@ private struct LargeUsageView: View {
             }
             if let credits = entry.creditsRemaining {
                 ValueLine(title: Text("Credits"), value: WidgetFormat.credits(credits))
+            }
+            if let balance = providerBalanceLine(for: entry) {
+                balance
             }
             if let token = entry.tokenUsage {
                 VStack(alignment: .leading, spacing: 4) {
@@ -581,6 +602,8 @@ struct WidgetUsageRow: Identifiable, Equatable {
         limit: Int? = nil,
         now: Date = Date()) -> [WidgetUsageRow]
     {
+        // DeepSeek exposes a balance, not a quota denominator; a 100% bar implies a limit that does not exist.
+        guard entry.provider != .deepseek else { return [] }
         let rows: [WidgetUsageRow]
         if let usageRows = entry.usageRows {
             let resolvedSnapshots = usageRows.map { row in
@@ -780,7 +803,7 @@ private struct HeaderView: View {
                 .font(.body)
                 .fontWeight(.semibold)
             Spacer()
-            Text(self.updatedAt, style: .relative)
+            Text(WidgetFormat.updateAge(self.updatedAt))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
@@ -906,6 +929,14 @@ struct WidgetBalanceLine: Equatable {
 }
 
 enum WidgetBalanceFormatter {
+    static func providerBalance(for entry: WidgetSnapshot.ProviderEntry) -> WidgetBalanceLine? {
+        guard entry.provider == .deepseek || entry.provider == .openrouter,
+              let value = entry.balanceText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return WidgetBalanceLine(title: "Balance", value: value)
+    }
+
     static func extraUsageCost(for entry: WidgetSnapshot.ProviderEntry) -> ProviderCostSnapshot? {
         // Provider-specific by design: Devin encodes its extra-usage balance as a named provider-cost period.
         guard entry.provider == .devin,
@@ -923,12 +954,27 @@ enum WidgetBalanceFormatter {
     }
 }
 
+private func providerBalanceLine(for entry: WidgetSnapshot.ProviderEntry) -> ValueLine? {
+    guard let line = WidgetBalanceFormatter.providerBalance(for: entry) else { return nil }
+    return ValueLine(title: Text(line.title), value: line.value)
+}
+
 private func extraUsageBalanceLine(for entry: WidgetSnapshot.ProviderEntry) -> ValueLine? {
     guard let line = WidgetBalanceFormatter.extraUsageBalance(for: entry) else { return nil }
     return ValueLine(title: Text(line.title), value: line.value)
 }
 
 enum WidgetFormat {
+    static func updateAge(_ date: Date, now: Date = Date()) -> String {
+        let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
+        if minutes < 1 { return "<1 min" }
+        if minutes < 60 { return "\(minutes) min" }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        if remainingMinutes == 0 { return "\(hours) hr" }
+        return "\(hours) hr, \(remainingMinutes) min"
+    }
+
     static func percent(_ value: Double?) -> String {
         guard let value else { return "—" }
         return String(format: "%.0f%%", value)

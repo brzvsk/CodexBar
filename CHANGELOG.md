@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Widgets: make DeepSeek and OpenRouter selectable, show their balances, hide DeepSeek's denominator-free progress bar, and round update ages to minutes.
 - Codex: refresh the selected account card while its menu stays open, preserving submenus and account ownership when delayed usage arrives (#3715, fixes #3709). Thanks @sandeep780049!
 - Claude: clarify claude-swap account activation, show switching and refresh phases until reconciliation finishes, and retain active-account inspection when credentials need repair (#3740, related to #3736).
 - Claude: apply the Remote Control startup override to direct CLI usage fallbacks too, preserving saved settings and managed-policy precedence (#3739, related to #2251). Thanks @rossshannon!
