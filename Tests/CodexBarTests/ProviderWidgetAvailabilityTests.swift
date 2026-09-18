@@ -52,9 +52,36 @@ struct ProviderWidgetAvailabilityTests {
         #expect(WidgetFormat.updateAge(now.addingTimeInterval(-3937), now: now) == "1 hr, 5 min")
     }
 
+    @Test
+    func `provider balance survives snapshot JSON round trip`() throws {
+        let snapshot = WidgetSnapshot(
+            entries: [Self.entry(provider: .deepseek, balanceText: "$15.25")],
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000))
+
+        let decoded = try JSONDecoder().decode(WidgetSnapshot.self, from: JSONEncoder().encode(snapshot))
+
+        #expect(decoded.entries.first?.provider == .deepseek)
+        #expect(decoded.entries.first?.balanceText == "$15.25")
+    }
+
+    @Test
+    func `legacy snapshot JSON without provider balance remains decodable`() throws {
+        let snapshot = WidgetSnapshot(
+            entries: [Self.entry(provider: .codex, balanceText: nil)],
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let encoded = try JSONEncoder().encode(snapshot)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        let entries = object?["entries"] as? [[String: Any]]
+
+        #expect(entries?.first?["balanceText"] == nil)
+        let decoded = try JSONDecoder().decode(WidgetSnapshot.self, from: encoded)
+        #expect(decoded.entries.first?.provider == .codex)
+        #expect(decoded.entries.first?.balanceText == nil)
+    }
+
     private static func entry(
         provider: UsageProvider,
-        balanceText: String) -> WidgetSnapshot.ProviderEntry
+        balanceText: String?) -> WidgetSnapshot.ProviderEntry
     {
         WidgetSnapshot.ProviderEntry(
             provider: provider,
