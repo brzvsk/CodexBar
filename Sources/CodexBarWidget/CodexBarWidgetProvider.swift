@@ -166,9 +166,11 @@ struct CodexBarTimelineProvider: AppIntentTimelineProvider {
         let provider = configuration.provider.provider
         let snapshot = WidgetSnapshotStore.load() ?? WidgetPreviewData.emptySnapshot()
         let now = Date()
-        let entry = CodexBarWidgetEntry(date: now, provider: provider, snapshot: snapshot)
         let refresh = BurnDownRefreshSchedule.nextRefresh(snapshot: snapshot, provider: provider, now: now)
-        return Timeline(entries: [entry], policy: .after(refresh))
+        let entries = WidgetAgeTimeline.dates(from: now, until: refresh).map {
+            CodexBarWidgetEntry(date: $0, provider: provider, snapshot: snapshot)
+        }
+        return Timeline(entries: entries, policy: .after(refresh))
     }
 }
 
@@ -193,7 +195,14 @@ struct CodexBarSwitcherTimelineProvider: TimelineProvider {
             snapshot: entry.snapshot,
             provider: entry.provider,
             now: entry.date)
-        completion(Timeline(entries: [entry], policy: .after(refresh)))
+        let entries = WidgetAgeTimeline.dates(from: entry.date, until: refresh).map {
+            CodexBarSwitcherEntry(
+                date: $0,
+                provider: entry.provider,
+                availableProviders: entry.availableProviders,
+                snapshot: entry.snapshot)
+        }
+        completion(Timeline(entries: entries, policy: .after(refresh)))
     }
 
     private func makeEntry() -> CodexBarSwitcherEntry {
@@ -225,6 +234,13 @@ struct CodexBarSwitcherTimelineProvider: TimelineProvider {
             return provider
         }
         return supported.isEmpty ? [.codex] : supported
+    }
+}
+
+enum WidgetAgeTimeline {
+    static func dates(from now: Date, until refresh: Date) -> [Date] {
+        guard refresh > now else { return [now] }
+        return stride(from: now, to: refresh, by: 60).map(\.self)
     }
 }
 

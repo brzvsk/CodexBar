@@ -52,6 +52,14 @@ struct ProviderWidgetAvailabilityTests {
         #expect(WidgetFormat.updateAge(now.addingTimeInterval(-3937), now: now) == "1 hr, 5 min")
     }
 
+    @Test
+    func `widget age timeline advances minute labels between data refreshes`() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let dates = WidgetAgeTimeline.dates(from: now, until: now.addingTimeInterval(185))
+
+        #expect(dates.map { $0.timeIntervalSince(now) } == [0, 60, 120, 180])
+    }
+
     private static func entry(
         provider: UsageProvider,
         balanceText: String) -> WidgetSnapshot.ProviderEntry
