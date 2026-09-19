@@ -602,7 +602,7 @@ struct WidgetUsageRow: Identifiable, Equatable {
         limit: Int? = nil,
         now: Date = Date()) -> [WidgetUsageRow]
     {
-        // DeepSeek exposes a balance, not a quota denominator; a 100% bar implies a limit that does not exist.
+        // Provider-specific by design: DeepSeek exposes no quota denominator, so a 100% bar would be misleading.
         guard entry.provider != .deepseek else { return [] }
         let rows: [WidgetUsageRow]
         if let usageRows = entry.usageRows {
@@ -940,6 +940,7 @@ struct WidgetBalanceLine: Equatable {
 
 enum WidgetBalanceFormatter {
     static func providerBalance(for entry: WidgetSnapshot.ProviderEntry) -> WidgetBalanceLine? {
+        // Provider-specific by design: these providers publish their widget value through the balance-text field.
         guard entry.provider == .deepseek || entry.provider == .openrouter,
               let value = entry.balanceText?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty
