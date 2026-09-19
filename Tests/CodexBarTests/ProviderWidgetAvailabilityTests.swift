@@ -55,6 +55,45 @@ struct ProviderWidgetAvailabilityTests {
     }
 
     @Test
+    func `OpenRouter retains its real quota alongside the credit balance`() {
+        let entry = WidgetSnapshot.ProviderEntry(
+            provider: .openrouter,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            primary: RateWindow(usedPercent: 25, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
+            secondary: nil,
+            tertiary: nil,
+            creditsRemaining: nil,
+            codeReviewRemainingPercent: nil,
+            tokenUsage: nil,
+            dailyUsage: [],
+            balanceText: "$60.00")
+
+        #expect(WidgetUsageRow.rows(for: entry).first?.percentLeft == 75)
+        for size in [WidgetTileSize.small, .medium, .large] {
+            #expect(WidgetMetricRows.rows(for: entry, size: size).contains {
+                $0.id == "provider-balance" && $0.value == "$60.00"
+            })
+        }
+    }
+
+    @Test
+    func `uncapped OpenRouter uses balance without inventing a quota`() {
+        let entry = Self.entry(provider: .openrouter, balanceText: "$60.00")
+        #expect(WidgetUsageRow.rows(for: entry).isEmpty)
+        #expect(WidgetFallbackHero.make(for: entry)?.value == "$60.00")
+    }
+
+    @Test
+    func `missing balance never becomes a zero balance or another provider metric`() {
+        for value in [nil, "", "  \n "] {
+            #expect(WidgetBalanceFormatter.providerBalance(
+                for: Self.entry(provider: .openrouter, balanceText: value)) == nil)
+        }
+        #expect(WidgetBalanceFormatter.providerBalance(
+            for: Self.entry(provider: .codex, balanceText: "$60.00")) == nil)
+    }
+
+    @Test
     func `widget update age omits seconds`() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         #expect(WidgetFormat.updateAge(now.addingTimeInterval(-157), now: now) == "2 min")
