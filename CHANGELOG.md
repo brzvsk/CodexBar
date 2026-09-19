@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.61.1 — Unreleased
+
+### Added
+
+- Widgets: make the binding quota easier to read, retain full provider names and secondary allowances, and share responsive tiles across Usage and Switcher widgets (#3137). Thanks @iamenahs!
+- Widgets: make DeepSeek and OpenRouter selectable, show their balances, hide DeepSeek's denominator-free progress bar, and round update ages to minutes.
+- Hooks: run opt-in `usage_updated` commands after successful current app refreshes and CLI watcher polls, with shared quota metadata, private account throttling, and explicit first-attempt behavior (#3512). Thanks @guillem-gelabert!
+- Overview: choose Detailed or Compact in Menu settings, with labeled usage bars, the existing provider navigation, and useful details for providers without quota bars (#2616). Thanks @Zihao-Qi!
+- Overview: share the displayed Usage & Spend summary through the local snapshot preview, with hidden sources excluded and truthful clipboard feedback (#3677). Thanks @Chipagosfinest!
+- Terminal actions: select stable Warp as the default terminal, with app-targeted launches, private temporary configs, restart-safe cleanup, and Terminal fallback (#3664, #3283). Thanks @salmonumbrella and @liorp!
+- Provider cards: hide individual detail sections from Visible usage items, preserving choices across language changes and restarts (#3638). Thanks @elijah7x!
+
+### Fixed
+
+- Codex costs: recover excess cached request rows from their original session files, retain pricing through interrupted scans, and avoid guessing request boundaries or conflicting prices (#3741, related to #3618). Thanks @BUKOWSKIREAL!
+
 ## 0.61.0 — 2026-09-18
 
 ### Highlights
@@ -27,7 +43,6 @@
 
 ### Fixed
 
-- Widgets: make DeepSeek and OpenRouter selectable, show their balances, hide DeepSeek's denominator-free progress bar, and round update ages to minutes.
 - Codex: refresh the selected account card while its menu stays open, preserving submenus and account ownership when delayed usage arrives (#3715, fixes #3709). Thanks @sandeep780049!
 - Claude: clarify claude-swap account activation, show switching and refresh phases until reconciliation finishes, and retain active-account inspection when credentials need repair (#3740, related to #3736).
 - Claude: apply the Remote Control startup override to direct CLI usage fallbacks too, preserving saved settings and managed-policy precedence (#3739, related to #2251). Thanks @rossshannon!

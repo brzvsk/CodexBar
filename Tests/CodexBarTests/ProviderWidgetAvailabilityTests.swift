@@ -25,6 +25,15 @@ struct ProviderWidgetAvailabilityTests {
                 value: value,
                 label: "Balance",
                 detail: nil))
+            #expect(WidgetMetricRows.rows(for: entry, size: .medium) == [WidgetMetricRow(
+                id: "provider-balance",
+                title: "Balance",
+                value: value)])
+            #expect(WidgetFallbackHero.make(for: entry) == WidgetFallbackHeroContent(
+                value: value,
+                caption: "Balance",
+                detail: nil,
+                consumedMetricID: "provider-balance"))
         }
     }
 
