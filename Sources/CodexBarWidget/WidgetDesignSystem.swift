@@ -422,15 +422,13 @@ struct FreshnessLabel: View {
     let updatedAt: Date
 
     var body: some View {
-        TimelineView(.everyMinute) { context in
-            Text(WidgetFormat.updateAge(self.updatedAt, now: context.date))
-                .font(.caption2)
-                .foregroundStyle(WidgetFreshness
-                    .isStale(self.updatedAt, now: context.date)
-                    ? AnyShapeStyle(Color.orange)
-                    : AnyShapeStyle(.secondary))
-                .lineLimit(1)
-        }
+        // WidgetKit advances native date text between reloads; a formatted TimelineView string can freeze.
+        // fixedSize on live date text can erase the rest of the tile.
+        Text(self.updatedAt, style: .relative)
+            .font(.caption2)
+            .foregroundStyle(WidgetFreshness
+                .isStale(self.updatedAt) ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+            .lineLimit(1)
     }
 }
 

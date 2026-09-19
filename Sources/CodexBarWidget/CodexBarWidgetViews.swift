@@ -696,16 +696,6 @@ enum WidgetFormat {
     /// Shown when a provider does not report a figure at all.
     static let unavailable = "—"
 
-    static func updateAge(_ date: Date, now: Date = Date()) -> String {
-        let minutes = max(0, Int(now.timeIntervalSince(date) / 60))
-        if minutes < 1 { return "<1 min" }
-        if minutes < 60 { return "\(minutes) min" }
-        let hours = minutes / 60
-        let remainingMinutes = minutes % 60
-        if remainingMinutes == 0 { return "\(hours) hr" }
-        return "\(hours) hr, \(remainingMinutes) min"
-    }
-
     static func percent(_ value: Double?) -> String {
         guard let value else { return self.unavailable }
         return String(format: "%.0f%%", value)

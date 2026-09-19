@@ -94,13 +94,6 @@ struct ProviderWidgetAvailabilityTests {
     }
 
     @Test
-    func `widget update age omits seconds`() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        #expect(WidgetFormat.updateAge(now.addingTimeInterval(-157), now: now) == "2 min")
-        #expect(WidgetFormat.updateAge(now.addingTimeInterval(-3937), now: now) == "1 hr, 5 min")
-    }
-
-    @Test
     func `provider balance survives snapshot JSON round trip`() throws {
         let snapshot = WidgetSnapshot(
             entries: [Self.entry(provider: .deepseek, balanceText: "$15.25")],

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Widgets: select DeepSeek and OpenRouter, see their balances, and follow update ages in minutes (#3743). Thanks @brzvsk!
+- Widgets: select DeepSeek and OpenRouter, see their balances, and keep live update ages visible in small widgets (#3743). Thanks @brzvsk!
 
 ### Fixed
 
